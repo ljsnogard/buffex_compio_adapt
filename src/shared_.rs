@@ -17,7 +17,10 @@ use core::{
 use std::io;
 
 use abs_buff::error::{ReadErrTag, TaggedError, TrErrorWrapper, WriteErrTag};
-use buffex::ring::{Ring, RingReader, RingWriter};
+use buffex::{
+    ring::{Ring, RingReader, RingWriter},
+    x_deps::abs_buff,
+};
 use mm_ptr::{Owned, Shared};
 
 use crate::alloc_::TrAllocConfig;

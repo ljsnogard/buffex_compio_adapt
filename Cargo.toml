@@ -6,16 +6,7 @@ description = "把任意 compio AsyncRead/AsyncWrite 设备接上 buffex 环的 
 license = "MIT/Apache-2.0"
 
 [dependencies]
-# 设备级适配（TrInput / TrOutput）已从 abs_buff_compio_adapt 搬进本 crate，
-# 因此不再依赖它（见 dev-notes 的方案修订）。
-#
-# 本 crate 用到了 `buffex` 的关闭入口（`Ring::close_producer` /
-# `Ring::close_consumer` 与两个半部的 `close`）。在它进入 gitee 的 `dev/0.3.0`
-# 分支之前，这里先用同仓的本地路径；分支更新后应换回：
-#   buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
-buffex = { path = "../buffex" }
-# 与 `buffex` 所引用的 `abs_buff` 同源同分支，故是同一个 crate（类型可直接对接）。
-abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 compio = { version = "0.19.*", features = ["io"] }
 

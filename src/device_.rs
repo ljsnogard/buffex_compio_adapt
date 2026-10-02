@@ -32,6 +32,7 @@ use abs_buff::{
     io::{TrInput, TrOutput},
     x_deps::{abs_cancel, anylr::SomeOf},
 };
+use buffex::x_deps::abs_buff;
 use compio::{
     buf::{BufResult, IoBuf, IoBufMut, SetLen},
     io::{AsyncRead, AsyncWrite},

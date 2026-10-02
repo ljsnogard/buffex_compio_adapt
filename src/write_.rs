@@ -37,19 +37,21 @@ use core::{borrow::Borrow, marker::PhantomData};
 
 use std::rc::Rc;
 
+use compio::{io::AsyncWrite, runtime::JoinHandle};
+
 use abs_buff::{
     Demand,
     buffer::TrBuffSegmRef,
     error::WriteErrTag,
     gen_may_cancel_future,
-    x_deps::{abs_cancel, anylr::SomeOf},
+    x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::TrMayCancel;
-use abs_buff::x_deps::anylr::some_of::SomeLR;
-use buffex::ring::{
-    ProducerError, Ring, RingReader, RingSegmMut, RingWriteAsync, RingWriter,
+use anylr::{SomeOf, some_of::SomeLR};
+use buffex::{
+    ring::{ProducerError, Ring, RingReader, RingSegmMut, RingWriteAsync, RingWriter},
+    x_deps::abs_buff,
 };
-use compio::{io::AsyncWrite, runtime::JoinHandle};
 
 use crate::{
     alloc_::{DefaultAllocConfig, TrAllocConfig},

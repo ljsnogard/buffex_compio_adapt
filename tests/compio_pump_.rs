@@ -29,7 +29,10 @@ use abs_buff::{
     error::ReadErrTag,
     x_deps::abs_cancel::CancelledToken,
 };
-use buffex::ring::{ConsumerError, Ring, ProducerError};
+use buffex::{
+    ring::{ConsumerError, Ring, ProducerError},
+    x_deps::abs_buff,
+};
 use buffex_compio_adapt::{
     BuffRead, BuffWrite, DefaultAllocConfig, RingBufOf, TrAllocConfig, TryNewError,
 };

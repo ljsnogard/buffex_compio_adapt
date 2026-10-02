@@ -63,7 +63,10 @@
 //! ```no_run
 //! #![feature(allocator_api)]
 //! use abs_buff::{Demand, TrBuffRead, TrBuffWrite};
-//! use buffex_compio_adapt::{BuffRead, BuffWrite, DefaultAllocConfig};
+//! use buffex_compio_adapt::{
+//!     BuffRead, BuffWrite, DefaultAllocConfig,
+//!     x_deps::abs_buff,
+//! };
 //! use compio::net::UnixStream;
 //!
 //! # async fn demo(dev_r: UnixStream, dev_w: UnixStream) -> std::io::Result<()> {
@@ -130,8 +133,8 @@ pub use write_::{
 
 /// 依赖重导出，便于调用方在不额外声明依赖的情况下对齐版本。
 pub mod x_deps {
-    pub use abs_buff;
     pub use buffex;
+    pub use buffex::x_deps::abs_buff;
     pub use compio;
     pub use mm_ptr;
 }

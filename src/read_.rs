@@ -31,8 +31,9 @@
 //! （见 [`crate::device_`]）；本 crate 用 owned 形态的适配让这次中转**稳态零分配**。
 
 use core::{borrow::Borrow, marker::PhantomData};
-
 use std::rc::Rc;
+
+use compio::{io::AsyncRead, runtime::JoinHandle};
 
 use abs_buff::{
     Demand,
@@ -40,10 +41,10 @@ use abs_buff::{
     error::ReadErrTag,
     x_deps::anylr::{self, SomeOf},
 };
-use buffex::ring::{
-    ConsumerError, Ring, RingReadAsync, RingReader, RingSegmRef, RingWriter,
+use buffex::{
+    ring::{ConsumerError, Ring, RingReadAsync, RingReader, RingSegmRef, RingWriter},
+    x_deps::abs_buff,
 };
-use compio::{io::AsyncRead, runtime::JoinHandle};
 
 use crate::{
     alloc_::{DefaultAllocConfig, TrAllocConfig},
