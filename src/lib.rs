@@ -61,7 +61,7 @@
 //! # 用法骨架
 //!
 //! ```no_run
-//! #![feature(allocator_api)]
+//! #![feature(allocator_ext)]
 //! use abs_buff::{Demand, TrBuffRead, TrBuffWrite};
 //! use buffex_compio_adapt::{
 //!     BuffRead, BuffWrite, DefaultAllocConfig,
@@ -108,7 +108,7 @@
 //! `buffex` / `abs_buff` 使用 nightly feature（`impl_trait_in_assoc_type` 等），因此本
 //! crate 也需要 nightly 工具链。
 
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 
 mod alloc_;

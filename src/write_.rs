@@ -95,7 +95,7 @@ pub type ReaderOf<C, S> = RingReader<S, RingBufOf<C>, u8>;
 /// # Examples
 ///
 /// ```no_run
-/// #![feature(allocator_api)]
+/// #![feature(allocator_ext)]
 /// use buffex_compio_adapt::{BuffWrite, DefaultAllocConfig};
 /// use compio::net::UnixStream;
 ///
@@ -289,9 +289,12 @@ where
 ///
 /// 正常退出的条件是**生产端已关闭**（`close_async` 置 `PRODUCER_CLOSED`）：此时 ring 的
 /// `read_async` 会在环被取空之后给出 `Closing`，泵据此进入收尾。
+///
+/// 守卫**独占持有**泵的消费端半部 `rx`（`close` 收 `&mut self`，关闭权归半部的所有者），
+/// 循环里经由 [`DerefMut`](core::ops::DerefMut) 使用它。
 async fn write_pump_<W, C, S>(
     dev: W,
-    mut rx: RingReader<S, RingBufOf<C>, u8>,
+    rx: RingReader<S, RingBufOf<C>, u8>,
     ring: S,
     ctl: Rc<Ctl_>,
 ) where
@@ -299,15 +302,15 @@ async fn write_pump_<W, C, S>(
     C: TrAllocConfig,
     S: Borrow<Ring<RingBufOf<C>, u8>> + Clone + 'static,
 {
-    // 守卫持有一份容器克隆：退出时置 CONSUMER_CLOSED 并唤醒生产者，调用方随即拿到 Closing。
-    let _close_guard = CloseOnDrop_::as_consumer_(ring.clone());
+    // 守卫独占泵的消费端半部：退出时置 CONSUMER_CLOSED 并唤醒生产者，调用方随即拿到 Closing。
+    let mut close_guard = CloseOnDrop_::new_(rx);
     let stage_cap = ring.borrow().capacity();
     let mut output = WriteAsOutputOwned::with_capacity(dev, stage_cap);
 
     loop {
         // 借读段：环空时 park，由生产者的 advance_write 唤醒。
         let demand = Demand::at_least(1);
-        let some = rx.read_async(&demand).await;
+        let some = close_guard.read_async(&demand).await;
         let Some(mut segm) = some.pick_left() else {
             // 生产端已关闭且环已取空（`close_async` 的正常收尾路径）。
             break;

@@ -5,14 +5,15 @@
 //! * [`alloc_ring_`]——按容量与配置里的分配器造一个元素为 `u8` 的环；
 //! * [`split_ring_`]——把 `Shared<Ring<…>>` 拆成一对**可长期持有**的半部；
 //! * [`Ctl_`]——设备错误暂存（泵写、适配器读）；
-//! * [`CloseOnDrop_`]——泵的「退出即关闭对端」守卫；
+//! * [`CloseOnDrop_`]——泵的「退出即关闭自己那一端」守卫（独占持有泵手里的半部）；
+//! * [`TrCloseHalf_`]——半部的「关闭本端」能力，[`CloseOnDrop_`] 据此在 `Drop` 里收尾；
 //! * [`TryNewError`]——构造期的两类错误（容量越界 / 不在 compio runtime 内）。
 
 use core::{
     borrow::{Borrow, BorrowMut},
     cell::{Cell, RefCell},
-    marker::PhantomData,
     mem::MaybeUninit,
+    ops::{Deref, DerefMut},
 };
 use std::io;
 
@@ -28,7 +29,7 @@ use crate::alloc_::TrAllocConfig;
 /// 某个配置下的环缓冲本体类型：`mm_ptr::Owned<[MaybeUninit<u8>], C::RingBodyAlloc>`。
 ///
 /// 元素固定 `u8`；本体用 `mm_ptr::Owned`（而不是 `Box`）是为了不依赖 `std` 的智能指针，
-/// 它由 `Owned::new_uninit_slice` 在 `allocator_api` 上分配，容量校验交给 `Ring::try_new`。
+/// 它由 `Owned::new_uninit_slice` 在 `allocator_ext` 上分配，容量校验交给 `Ring::try_new`。
 pub type RingBufOf<C> = Owned<[MaybeUninit<u8>], <C as TrAllocConfig>::RingBodyAlloc>;
 
 /// 某个配置下的共享容器类型：`mm_ptr::Shared<Ring<RingBufOf<C>, u8>, C::RingSharedAlloc>`。
@@ -150,68 +151,85 @@ fn take_write_err_(err: TaggedError<io::Error, WriteErrTag>) -> (io::Error, Writ
     }
 }
 
-/// 泵退出时要关闭环的哪一端。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CloseSide_ {
-    /// 关闭生产端（读泵：设备 → 环）。
-    Producer,
-    /// 关闭消费端（写泵：环 → 设备）。
-    Consumer,
+/// 环半部的「关闭本端」能力：由持有半部的一方实现，供 [`CloseOnDrop_`] 调用。
+///
+/// `buffex` 把关闭权收归到 `&mut self` 的持有者（`RingWriter::close` /
+/// `RingReader::close` 都收 `&mut self`），因此「谁能关闭」等价于「谁独占拥有半部」。
+/// 本 trait 只是把两个半部各自的 `close` 收敛成一个名字，好让守卫对二者一视同仁。
+pub(crate) trait TrCloseHalf_ {
+    /// 关闭本半部代表的那一端。
+    fn close_half_(&mut self);
 }
 
-/// 后台泵的守卫：**无论正常返回、被取消还是 panic**，退出时都把对端置为「已关闭」。
+impl<S, B> TrCloseHalf_ for RingWriter<S, B, u8>
+where
+    S: Borrow<Ring<B, u8>>,
+    B: BorrowMut<[MaybeUninit<u8>]>,
+{
+    fn close_half_(&mut self) {
+        self.close()
+    }
+}
+
+impl<S, B> TrCloseHalf_ for RingReader<S, B, u8>
+where
+    S: Borrow<Ring<B, u8>>,
+    B: BorrowMut<[MaybeUninit<u8>]>,
+{
+    fn close_half_(&mut self) {
+        self.close()
+    }
+}
+
+/// 后台泵的守卫：**无论正常返回、被取消还是 panic**，退出时都把自己那一端置为「已关闭」。
 ///
 /// 为什么需要它：泵是唯一的搬运方，一旦它退出（设备结束 / 出错 / 适配器被 drop），
 /// 对端就再也不会有任何进度。没有这条守卫，正在 park 的调用方会永久挂起；
-/// 有了它，调用方一定会被唤醒并拿到 `Closing`。
+/// 有了它，调用方一定会被唤醒并拿到 `Closing`。另外 `buffex` 的
+/// [`RingWriter`] / [`RingReader`] **自身没有 `Drop`**，因此本守卫是泵退出时唯一的
+/// 关闭者，不是可有可无的保险。
 ///
-/// 它只持有**一份环容器克隆**（`S: Clone`），不持有任何半部，因此不会与泵正在使用的
-/// 段 / 半部产生借用冲突；关闭本身也只动状态字、不碰数据区（`close` 收 `&self`）。
-pub(crate) struct CloseOnDrop_<S, B>
-where
-    S: Borrow<Ring<B, u8>>,
-    B: BorrowMut<[MaybeUninit<u8>]>,
-{
-    ring_: S,
-    side_: CloseSide_,
-    _buf_: PhantomData<fn() -> B>,
+/// # 为什么是「拥有半部」而不是「再克隆一份共享容器」
+///
+/// `buffex` 的 `close` 收 `&mut self`：关闭权归**独占持有半部**的一方。共享容器
+/// （`mm_ptr::Shared` 等）只实现 `Borrow`，给出的是 `&Ring`，拿不到 `&mut Ring`；
+/// 就算给它补上 `BorrowMut`，守卫活着时泵的半部与适配器手里的对端半部也仍然存在，
+/// 借出 `&mut Ring` 就是对同一条环同时存在 `&mut` 与其它活引用——正是关闭权收紧
+/// 想要排除的别名场景。
+///
+/// 于是这里让守卫**直接拥有**泵那一份半部：半部本来就由泵独占，`Drop` 拿到
+/// `&mut self` 后合法地转交 `&mut` 给半部，关闭权与所有权自然对齐。泵对半部的
+/// 使用经 [`Deref`] / [`DerefMut`] 转发，写法与直接持有时完全一致。
+pub(crate) struct CloseOnDrop_<H: TrCloseHalf_> {
+    /// 被守卫独占的半部。
+    half_: H,
 }
 
-impl<S, B> CloseOnDrop_<S, B>
-where
-    S: Borrow<Ring<B, u8>>,
-    B: BorrowMut<[MaybeUninit<u8>]>,
-{
-    /// 读泵用：退出时关闭生产端（相当于 EOF）。
-    pub(crate) fn as_producer_(ring: S) -> Self {
-        CloseOnDrop_ {
-            ring_: ring,
-            side_: CloseSide_::Producer,
-            _buf_: PhantomData,
-        }
-    }
-
-    /// 写泵用：退出时关闭消费端（相当于「没人再消费了」）。
-    pub(crate) fn as_consumer_(ring: S) -> Self {
-        CloseOnDrop_ {
-            ring_: ring,
-            side_: CloseSide_::Consumer,
-            _buf_: PhantomData,
-        }
+impl<H: TrCloseHalf_> CloseOnDrop_<H> {
+    /// 用泵自己那份半部建立守卫；退出时关闭的就是这一端。
+    pub(crate) fn new_(half: H) -> Self {
+        CloseOnDrop_ { half_: half }
     }
 }
 
-impl<S, B> Drop for CloseOnDrop_<S, B>
-where
-    S: Borrow<Ring<B, u8>>,
-    B: BorrowMut<[MaybeUninit<u8>]>,
-{
+impl<H: TrCloseHalf_> Deref for CloseOnDrop_<H> {
+    type Target = H;
+
+    fn deref(&self) -> &H {
+        &self.half_
+    }
+}
+
+impl<H: TrCloseHalf_> DerefMut for CloseOnDrop_<H> {
+    fn deref_mut(&mut self) -> &mut H {
+        &mut self.half_
+    }
+}
+
+impl<H: TrCloseHalf_> Drop for CloseOnDrop_<H> {
     fn drop(&mut self) {
-        let ring = self.ring_.borrow();
-        match self.side_ {
-            CloseSide_::Producer => ring.close_producer(),
-            CloseSide_::Consumer => ring.close_consumer(),
-        }
+        // 关闭权归本守卫独占的半部；这里只是把 `&mut` 转交给它。
+        self.half_.close_half_()
     }
 }
 

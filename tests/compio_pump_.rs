@@ -8,7 +8,7 @@
 //! compio 的 `AsyncRead` / `AsyncWrite`，因此用例是确定性的：短读、EOF、错误的时机完全
 //! 由测试控制，不依赖真实 socket 的时序。
 
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 
 use core::{future::pending, mem::MaybeUninit};
 
@@ -97,6 +97,18 @@ impl AsyncRead for FailReadDevice {
             Result::Err(io::Error::new(io::ErrorKind::BrokenPipe, "设备坏了")),
             buf,
         )
+    }
+}
+
+/// 只读设备：第一次 `read` 就 panic。
+///
+/// 用于验证守卫在「泵任务 panic / unwind」这条退出路径上仍然关闭生产端——`buffex` 的
+/// 环半部自身没有 `Drop`，守卫是泵退出时唯一的关闭者。
+struct PanicReadDevice;
+
+impl AsyncRead for PanicReadDevice {
+    async fn read<B: IoBufMut>(&mut self, _buf: B) -> BufResult<usize, B> {
+        panic!("读设备故意 panic：用于验证守卫在 unwind 中关闭生产端")
     }
 }
 
@@ -373,6 +385,32 @@ async fn buff_read_records_device_error_() {
     assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(tag, ReadErrTag::Propagated);
     assert!(!rx.is_read_ended(), "设备错误不是正常结束");
+}
+
+/// 入向：后台泵 panic（unwind）时守卫仍关闭生产端，调用方拿到 `Closing` 而不是挂起。
+/// - 测试目标：`CloseOnDrop_` 守卫的第三条退出路径（panic）——环的半部自身没有 `Drop`，
+///   守卫是泵退出时唯一的关闭者，因此这条路径不能只写在文档里。
+/// - 测试手段：`PanicReadDevice` 第一次 `read` 即 panic；构造 `BuffRead` 后 await
+///   `read_async`，并用 5 秒超时把「守卫失效 ⇒ 读端被永久 park」截断成可读的失败。
+/// - 判定标准：读返回 `ConsumerError::Closing`；`is_pump_finished()` 为真。
+#[compio::test]
+async fn pump_panic_still_closes_ring_and_wakes_reader_() {
+    let mut rx =
+        BuffRead::<_, DefaultAllocConfig>::try_new(PanicReadDevice, 64, DefaultAllocConfig)
+            .expect("容量合法");
+
+    let demand = Demand::at_least(1);
+    // `RingReadAsync` 实现的是 `IntoFuture` 而不是 `Future`，`timeout` 要后者，故显式转换。
+    let read_fut = core::future::IntoFuture::into_future(rx.read_async(&demand));
+    let some = compio::time::timeout(std::time::Duration::from_secs(5), read_fut)
+        .await
+        .expect("泵 panic 后守卫必须关闭生产端；此处超时即说明读端被永久 park");
+
+    assert!(
+        matches!(some.pick_right(), Option::Some(ConsumerError::Closing)),
+        "生产端已被守卫关闭，读端应拿到 Closing"
+    );
+    assert!(rx.is_pump_finished(), "泵任务应已因 panic 结束");
 }
 
 /// 入向：设备短读（每次只给几个字节）不丢字节、不乱序。
@@ -751,17 +789,17 @@ async fn allocator_config_applies_per_allocation_site_() {
 
 /// `TryNewError::InvalidCapacity`：容量越界时给出可读错误而不是 panic。
 /// - 测试目标：构造期容量校验失败的错误路径。
-/// - 测试手段：用一个越界容量（1，小于 ring 的下限 2）构造 `BuffRead`。
-/// - 判定标准：返回 `Err(TryNewError::InvalidCapacity(1))`。
+/// - 测试手段：用一个越界容量（0，小于 ring 的下限 1）构造 `BuffRead`。
+/// - 判定标准：返回 `Err(TryNewError::InvalidCapacity(0))`。
 #[compio::test]
 async fn invalid_capacity_is_reported_() {
     let err = BuffRead::<_, DefaultAllocConfig>::try_new(
         SliceDevice::new_(Vec::new(), 0),
-        1,
+        0,
         DefaultAllocConfig,
     )
-    .expect_err("容量 1 会被 ring 拒绝");
-    assert_eq!(err, TryNewError::InvalidCapacity(1));
+    .expect_err("容量 0 会被 ring 拒绝");
+    assert_eq!(err, TryNewError::InvalidCapacity(0));
 }
 
 /// `TryNewError::NotInRuntime`：不在 compio runtime 内构造时给出错误，而不是 panic。

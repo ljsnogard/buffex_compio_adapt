@@ -23,7 +23,7 @@
 //! # 示例
 //!
 //! ```no_run
-//! #![feature(allocator_api)]
+//! #![feature(allocator_ext)]
 //! use std::alloc::Global;
 //!
 //! use buffex_compio_adapt::TrAllocConfig;
