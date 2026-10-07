@@ -26,11 +26,14 @@
 //!
 //! # 零拷贝程度
 //!
-//! 段级是零拷贝的（环的写段直接交给 `move_items_from_input_async`），但 compio 的设备
-//! 接口要求 `'static` 的 owned 缓冲，因此「设备 ↔ 环」之间必然过一次中转缓冲
-//! （见 [`crate::device_`]）；本 crate 用 owned 形态的适配让这次中转**稳态零分配**。
+//! compio 的设备接口要求 `'static` 的 owned 缓冲，因此「设备 ↔ 环」之间必然过一次中转
+//! 缓冲（见 [`crate::device_`]）；本 crate 用 owned 形态的适配让这次中转**稳态零分配**。
+//! 读侧另有**一次**拷贝：为了让「设备给多少就交付多少」成为可能，泵先单独读一次设备、
+//! 再把这一批拷进环段（`read_pump_` 的模块文档说明了为什么不能像 tokio / smol 那样
+//! 「只 poll 一次搬移」——compio 的设备读是提交型操作，丢弃未完成的 future 会连带丢掉
+//! 已完成的读结果）。
 
-use core::{borrow::Borrow, marker::PhantomData};
+use core::{borrow::Borrow, marker::PhantomData, mem::MaybeUninit};
 use std::rc::Rc;
 
 use compio::{io::AsyncRead, runtime::JoinHandle};
@@ -39,6 +42,7 @@ use abs_buff::{
     Demand,
     buffer::TrBuffSegmMut,
     error::ReadErrTag,
+    io::TrInput,
     x_deps::anylr::{self, SomeOf},
 };
 use buffex::{
@@ -123,8 +127,7 @@ where
     R: AsyncRead + 'static,
     C: TrAllocConfig,
     S: Borrow<Ring<RingBufOf<C>, u8>> + 'static,
-{
-}
+{}
 
 // 环的两半只有在缓冲本体 `B: Debug` 时才 `Debug`，而 `B` 是
 // `Owned<[MaybeUninit<u8>], _>`：`MaybeUninit` 从不是 `Debug`。这里只打印与设备 /
@@ -223,8 +226,7 @@ where
     C: TrAllocConfig,
     S: Borrow<Ring<RingBufOf<C>, u8>> + 'static,
 {
-    type SegmRef<'f>
-        = RingSegmRef<'f, RingBufOf<C>, u8>
+    type SegmRef<'f> = RingSegmRef<'f, RingBufOf<C>, u8>
     where
         Self: 'f;
 
@@ -267,6 +269,21 @@ where
 /// 退出路径由 [`CloseOnDrop_`] 守卫兜底（正常返回、被取消、panic 三种情形都会关闭
 /// 生产端），因此调用方的 park 一定能醒。守卫**独占持有**泵的生产端半部 `tx`
 /// （`close` 收 `&mut self`，关闭权归半部的所有者），循环里经由 [`DerefMut`] 使用它。
+///
+/// # 「有数据就交付」：为什么每次只读一次设备
+///
+/// 上游 `move_items_from_input_async` 的语义是**填满**段：设备给出 25 字节后转为空闲时
+/// 它只是 `Pending`——数据被扣在段里、一个字节也不提交。对「请求 / 应答」式上层
+/// （握手帧、乒乓消息）来说这等于永久静止：对端在等我们应答，而我们还在等它把段填满。
+/// 上层协议栈只会把本适配器当 `TrBuffRead` 用，没有「喂满一段」的义务。
+///
+/// 因此这里把「读设备」与「写进环」拆成两步：**先**单独做一次设备读（compio 的
+/// `read` 就是一次读系统调用，读到多少算多少，不 park 等填满），**再**把读到的那一批
+/// 拷进环段、逐段提交。代价是 compio 侧本就存在的中转拷贝之外多一次拷贝——换来的是
+/// 「上层提交完就能被看到」，而不是「等一段填满才被看到」。
+///
+/// （对 tokio / smol 侧可以用「只 poll 一次搬移」保住零拷贝；compio 的设备读是**提交
+/// 型**操作、丢弃未完成的 future 即取消它，已完成的读结果会跟着丢，所以这里不用那一招。）
 async fn read_pump_<R, C, S>(
     dev: R,
     tx: RingWriter<S, RingBufOf<C>, u8>,
@@ -282,36 +299,47 @@ async fn read_pump_<R, C, S>(
     // 中转缓冲按环容量预置一次，之后一直复用（compio 要求 owned 缓冲，这是那一次拷贝）。
     let stage_cap = ring.borrow().capacity();
     let mut input = ReadAsInputOwned::with_capacity(dev, stage_cap);
+    // 一次设备读的落点；容量按环容量预置一次，之后复用。
+    let mut staged: Vec<MaybeUninit<u8>> =
+        (0..stage_cap).map(|_| MaybeUninit::uninit()).collect();
+    let demand = Demand::at_least(1);
 
     loop {
-        // 借写段：环满时 park，由消费者的 advance_read 唤醒。
-        let demand = Demand::at_least(1);
-        let some = close_guard.write_async(&demand).await;
-        let Some(mut segm) = some.pick_left() else {
-            // 消费端已关闭（适配器被 drop）：泵没有继续搬运的意义。
-            break;
-        };
-        let room = segm.least_count();
-        let move_demand = Demand::no_more_than(room);
-        let moved = segm
-            .move_items_from_input_async(&mut input, &move_demand)
-            .await;
-        // 段在这里 drop：按已写入量 advance_write，唤醒等待的读端。
-        drop(segm);
-        match moved.into_inner() {
-            anylr::some_of::SomeLR::Left(n) => {
-                debug_assert!(n > 0, "无错误的搬移必须至少搬入 1 个元素");
-            }
-            // 只带错误、没搬进东西：记错误后收工（不能当成「搬了 0 个的成功」）。
+        // ① 读一次设备：读到多少算多少（`Ok(0)` 会被设备适配层翻成 `Closing`）。
+        let read = input.read_async(&mut staged[..]).await;
+        let n = match read.into_inner() {
+            anylr::some_of::SomeLR::Left(n) => n,
             anylr::some_of::SomeLR::Right(err) => {
                 ctl.set_read_err_(err);
                 break;
             }
-            // 搬了一部分又结束：这部分已随段提交进环，再记状态。
-            anylr::some_of::SomeLR::Both(_n, err) => {
+            anylr::some_of::SomeLR::Both(n, err) => {
                 ctl.set_read_err_(err);
+                if n == 0 {
+                    break;
+                }
+                n
+            }
+        };
+        if n == 0 {
+            // 设备适配层不允许「读到 0 且无错误」；真出现就收工，免得空转。
+            break;
+        }
+        // ② 把这一批拷进环：逐段借、逐段提交（环满则 park 等消费者腾空间）。
+        let mut off = 0usize;
+        while off < n {
+            let some = close_guard.write_async(&demand).await;
+            let Some(mut segm) = some.pick_left() else {
+                // 消费端已关闭（适配器被 drop）：泵没有继续搬运的意义。
+                return;
+            };
+            let moved = segm.move_items_from_as_buff(&staged[off..n]);
+            // 段在这里 drop：按已写入量 advance_write，唤醒等待的读端。
+            drop(segm);
+            if moved == 0 {
                 break;
             }
+            off += moved;
         }
     }
 }

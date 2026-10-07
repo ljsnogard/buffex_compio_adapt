@@ -152,6 +152,26 @@ where
     }
 }
 
+impl<W, C, S> Drop for BuffWrite<W, C, S>
+where
+    W: AsyncWrite + 'static,
+    C: TrAllocConfig,
+    S: Borrow<Ring<RingBufOf<C>, u8>> + 'static,
+{
+    /// 丢适配器 = **关生产端 + detach 泵**：已提交进环的字节仍会被搬完并 `shutdown`。
+    ///
+    /// 不能只是丢 `JoinHandle`——compio 的句柄在 drop 时 `cancel(true)`，那会把还没送出
+    /// 的字节连同泵一起取消掉；而上层协议栈（例如 `smux_v1` 的写泵）只会丢连接，不会
+    /// 替适配器调 [`close_async`](BuffWrite::close_async)。
+    fn drop(&mut self) {
+        self.tx_.close();
+        if let Option::Some(pump) = self.pump_.take() {
+            // compio 的 `JoinHandle` 丢弃即取消，必须显式 detach 让它跑完收尾。
+            pump.detach();
+        }
+    }
+}
+
 impl<W, C> BuffWrite<W, C, SharedRingOf<C>>
 where
     W: AsyncWrite + 'static,
