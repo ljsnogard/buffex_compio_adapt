@@ -40,7 +40,8 @@ use std::rc::Rc;
 use compio::{io::AsyncWrite, runtime::JoinHandle};
 
 use abs_buff::{
-    Demand,
+    Demand, TrBuffWrite, TrBuffTryWrite,
+    buffer::TrProducerState,
     buffer::TrBuffSegmRef,
     error::WriteErrTag,
     gen_may_cancel_future,
@@ -261,7 +262,7 @@ where
     }
 }
 
-impl<W, C, S> abs_buff::TrBuffTryWrite<u8> for BuffWrite<W, C, S>
+impl<W, C, S> TrBuffTryWrite<u8> for BuffWrite<W, C, S>
 where
     W: AsyncWrite + 'static,
     C: TrAllocConfig,
@@ -284,7 +285,7 @@ where
     }
 }
 
-impl<W, C, S> abs_buff::TrBuffWrite<u8> for BuffWrite<W, C, S>
+impl<W, C, S> TrBuffWrite<u8> for BuffWrite<W, C, S>
 where
     W: AsyncWrite + 'static,
     C: TrAllocConfig,
@@ -302,6 +303,17 @@ where
         demand: &'f Demand<usize>,
     ) -> Self::WriteAsync<'f> {
         self.tx_.write_async(demand)
+    }
+}
+
+impl<W, C, S> TrProducerState for BuffWrite<W, C, S>
+where
+    W: AsyncWrite + 'static,
+    C: TrAllocConfig,
+    S: Borrow<Ring<RingBufOf<C>, u8>> + 'static,
+{
+    fn producer_state(&self) -> Option<(usize, bool)> {
+        self.tx_.producer_state()
     }
 }
 

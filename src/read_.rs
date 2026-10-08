@@ -39,8 +39,8 @@ use std::rc::Rc;
 use compio::{io::AsyncRead, runtime::JoinHandle};
 
 use abs_buff::{
-    Demand,
-    buffer::TrBuffSegmMut,
+    Demand, TrBuffRead, TrBuffTryRead,
+    buffer::{TrBuffSegmMut, TrConsumerState},
     error::ReadErrTag,
     io::TrInput,
     x_deps::anylr::{self, SomeOf},
@@ -220,7 +220,7 @@ where
     }
 }
 
-impl<R, C, S> abs_buff::TrBuffTryRead<u8> for BuffRead<R, C, S>
+impl<R, C, S> TrBuffTryRead<u8> for BuffRead<R, C, S>
 where
     R: AsyncRead + 'static,
     C: TrAllocConfig,
@@ -242,7 +242,7 @@ where
     }
 }
 
-impl<R, C, S> abs_buff::TrBuffRead<u8> for BuffRead<R, C, S>
+impl<R, C, S> TrBuffRead<u8> for BuffRead<R, C, S>
 where
     R: AsyncRead + 'static,
     C: TrAllocConfig,
@@ -261,6 +261,17 @@ where
         demand: &'f Demand<usize>,
     ) -> Self::ReadAsync<'f> {
         self.rx_.read_async(demand)
+    }
+}
+
+impl<R, C, S> TrConsumerState for BuffRead<R, C, S>
+where
+    R: AsyncRead + 'static,
+    C: TrAllocConfig,
+    S: Borrow<Ring<RingBufOf<C>, u8>> + 'static,
+{
+    fn consumer_state(&self) -> Option<(usize, bool)> {
+        self.rx_.consumer_state()
     }
 }
 
